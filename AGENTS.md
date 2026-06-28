@@ -4,10 +4,11 @@
 
 This repository contains the **Sovereign Automation Stack (OpenSAS)** — a turnkey, zero-data-leak, fully private AI and automation infrastructure deployed within secure environments (VPC or on-premise bare-metal). The one-pager at `opensas.md` is the canonical architecture reference.
 
-The stack is a 4-tier modular architecture:
+The stack is a 5-tier modular architecture (Layer 0 is the foundational mesh deployed first — everything else connects through it):
 
 | Layer | Name | Core Components |
 |-------|------|----------------|
+| **0** | Mesh & Connectivity | Teleport (Community Edition), WireGuard, node enrollment & trust propagation |
 | **1** | Interfaces | LibreChat, Slack/Discord/Mattermost bots, Streamlit, Chainlit |
 | **2** | App & Orchestration | n8n (self-hosted), MCP Servers, Python/FastAPI microservices |
 | **3** | Data & Privacy | MinIO, Qdrant/Milvus/pgvector, IAM Policy Mapping |
@@ -29,12 +30,15 @@ opensas/
 │
 ├── charts/                # Helm charts for stack components
 │   ├── opensas-stack/     # Umbrella chart (deploys all layers)
+│   ├── opensas-teleport/  # Mesh & Connectivity (Layer 0)
 │   ├── opensas-interfaces/
 │   ├── opensas-orchestration/
 │   ├── opensas-data-privacy/
 │   └── opensas-infra/
 │
 ├── config/                # Reference configs & examples
+│   ├── teleport/          # Teleport cluster config, roles, RBAC
+│   ├── wireguard/         # WireGuard underlay configs
 │   ├── litellm/
 │   ├── n8n/
 │   ├── vllm/
@@ -87,9 +91,10 @@ Conventional Commits format:
 [optional body]
 ```
 Types: `feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `ci`, `style`, `perf`
-Scopes: `infra`, `interfaces`, `orchestration`, `data`, `charts`, `docs`, `ci`
+Scopes: `infra`, `mesh`, `interfaces`, `orchestration`, `data`, `charts`, `docs`, `ci`
 
 Examples:
+- `feat(mesh): add Teleport Helm chart with WireGuard underlay`
 - `feat(infra): add vLLM Helm chart with GPU tolerations`
 - `fix(orchestration): correct n8n webhook secret injection`
 - `docs(data): document pgvector connection pooling`
@@ -131,6 +136,7 @@ Examples:
 - All storage via MinIO (S3-compatible) or local PVs
 - Ingress via any standard IngressController / CNI
 - Container images from registries that work in air-gapped environments (GHCR, Docker Hub with mirroring support)
+- VPS fleet orchestrated via Teleport mesh (not cloud-specific SSM, Session Manager, or console access)
 
 ---
 
@@ -140,7 +146,9 @@ Examples:
 - Always read `opensas.md` first if you need architectural context
 - When modifying Helm charts, run `helm lint` before considering work done
 - For YAML changes, prefer `edit` over `write` to preserve unrelated content
-- When proposing new components, reference the 4-layer architecture and explain which layer it belongs to
+- When proposing new components, reference the 5-layer architecture (Layers 0–4) and explain which layer it belongs to
+- Layer 0 (Teleport mesh) is a prerequisite for all other layers — never suggest deploying Layers 1–4 without the mesh foundation
+- Teleport is the identity plane for the entire fleet; prefer Teleport roles/RBAC over separate SSH key management
 - Keep responses concise; show file paths clearly
 
 ### Available Slash Commands (Skills)
@@ -183,8 +191,8 @@ helm install --dry-run --debug opensas-stack ./charts/opensas-stack
 This repo is greenfield. The following directories should be created as the project evolves:
 
 - [ ] `.github/workflows/` — CI/CD pipelines
-- [ ] `charts/` — Helm charts for each layer
-- [ ] `config/` — reference configurations
+- [ ] `charts/` — Helm charts for each layer (including `opensas-teleport`)
+- [ ] `config/` — reference configurations (including `teleport/` and `wireguard/`)
 - [ ] `docs/` — architecture, deployment, security docs
 - [ ] `examples/` — n8n workflows, MCP server examples, agent code
 - [ ] `scripts/` — bootstrap, teardown, validation scripts

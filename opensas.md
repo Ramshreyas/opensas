@@ -4,18 +4,19 @@
 
 Enterprises are racing to adopt agentic workflows and LLM automation but are severely constrained by data privacy, compliance, and vendor lock-in risks. Public cloud AI APIs risk exposing proprietary corporate data and intellectual property.
 
-The **Sovereign Automation Stack** is a turnkey, zero-data-leak, fully private AI and automation infrastructure deployed directly within your secure environment (VPC or on-premise bare-metal). By combining production-grade inference orchestration, flexible application layers, and strict data governance, this offering enables enterprises to build, execute, and monitor autonomous AI agents and automated workflows without a single byte of data leaving their private infrastructure.
+The **Sovereign Automation Stack** is a turnkey, zero-data-leak, fully private AI and automation infrastructure deployed directly within your secure environment (VPC or on-premise bare-metal). By combining production-grade inference orchestration, flexible application layers, strict data governance, and a zero-trust mesh networking fabric, this offering enables enterprises to build, execute, and monitor autonomous AI agents and automated workflows without a single byte of data leaving their private infrastructure.
 
 ---
 
 ## The Core Offering
 
-Our consultancy delivers an enterprise-grade, production-tested AI blueprint engineered for zero-trust data environments. The platform maps out as a modular, 4-tier stack that cleanly separates user access from the secure backend infrastructure:
+Our consultancy delivers an enterprise-grade, production-tested AI blueprint engineered for zero-trust data environments. The platform maps out as a modular, 5-tier stack that cleanly separates user access from the secure backend infrastructure:
 
 ### 🗺️ System Architecture & Stack Blueprint
 
 | Layer | Primary Functions | Core Components & Technologies |
 | --- | --- | --- |
+| **0. Mesh & Connectivity** | Zero-trust cluster mesh, secure node-to-node communication, identity-aware SSH/access, and multi-cluster federation across the VPS fleet. | Teleport (Community Edition), WireGuard kernel encryption |
 | **1. Interfaces** | Workspace collaboration, interactive chat portals, and rapid prototyping tools. | LibreChat, Slack / Discord / Mattermost bots, Streamlit, Chainlit |
 | **2. App & Orchestration** | Visual workflow building, custom agent runtimes, and local tool/data calling. | Self-hosted n8n, Model Context Protocol (MCP) Servers, Python/FastAPI |
 | **3. Data & Privacy** | Secure document storage, localized semantic search, and user permission mapping. | MinIO (S3-compat), Qdrant / Milvus / pgvector, IAM Policy Mapping |
@@ -46,6 +47,15 @@ A strictly air-gapped context architecture ensuring agents can access corporate 
 * **S3-Compatible Object Storage:** Deep integration with high-performance, local data stores via **MinIO** or Ceph to host internal document pipelines safely.
 * **Vector Search & RAG:** Deployment of enterprise vector databases like **Qdrant** or **Milvus** (or localized **pgvector** extensions within existing PostgreSQL footprints) for robust Retrieval-Augmented Generation.
 * **Identity & Access Governance:** Fine-grained data access layers forcing autonomous agents to inherit the exact identity and access management (IAM) permissions of the user invoking them.
+
+### 0. Mesh & Connectivity Layer (The Secure Fabric) 🕸️
+
+The foundational networking layer that establishes a zero-trust mesh across the entire VPS fleet. Deployed first — everything else connects through it.
+
+* **Identity-Aware Access:** **Teleport (Community Edition)** provides unified SSH, Kubernetes, and web application access with built-in RBAC, session recording, and audit logging — no VPN or bastion host required.
+* **Fleet Orchestration:** Single-plane control for all nodes across the cluster, with automatic certificate management, node enrollment, and trust propagation.
+* **Underlay Encryption:** **WireGuard** serves as the kernel-level encrypted underlay for node-to-node traffic, with Teleport handling the control plane and identity layer above it.
+* **Audit & Compliance:** Full session recording (SSH + K8s exec), certificate lifecycle management, and exportable audit events for SOC2/enterprise compliance use cases.
 
 ### 4. Infrastructure, Observability, & Day-2 Operations (The Engine Room)
 
