@@ -4,15 +4,15 @@
 
 This repository contains the **Sovereign Automation Stack (OpenSAS)** — a turnkey, zero-data-leak, fully private AI and automation infrastructure deployed within secure environments (VPC or on-premise bare-metal). The one-pager at `opensas.md` is the canonical architecture reference.
 
-The stack is a 5-tier modular architecture (Layer 0 is the foundational mesh deployed first — everything else connects through it):
+The stack is a 5-tier modular architecture built bottom-up (Layer 0 is the foundational mesh, Layer 4 is the user-facing interface):
 
 | Layer | Name | Core Components |
 |-------|------|----------------|
 | **0** | Mesh & Connectivity | Teleport (Community Edition), WireGuard, node enrollment & trust propagation |
-| **1** | Interfaces | LibreChat, Slack/Discord/Mattermost bots, Streamlit, Chainlit |
-| **2** | App & Orchestration | n8n (self-hosted), MCP Servers, Python/FastAPI microservices |
-| **3** | Data & Privacy | MinIO, Qdrant/Milvus/pgvector, IAM Policy Mapping |
-| **4** | Infrastructure & Day-2 | vLLM, LiteLLM Proxy, OpenBao, Phoenix/Langfuse, Grafana |
+| **1** | Infrastructure & Day-2 | vLLM, LiteLLM Proxy, OpenBao, Phoenix (Arize) / Langfuse, Grafana |
+| **2** | Data & Privacy | MinIO, Qdrant/Milvus/pgvector, IAM Policy Mapping |
+| **3** | App & Orchestration | n8n (self-hosted), MCP Servers, Python/FastAPI microservices |
+| **4** | Interfaces | LibreChat, Slack/Discord/Mattermost bots, Streamlit, Chainlit |
 
 ---
 
@@ -28,13 +28,13 @@ opensas/
 ├── .github/
 │   └── workflows/         # GitHub Actions CI/CD (cloud-agnostic)
 │
-├── charts/                # Helm charts for stack components
+├── charts/                # Helm charts for stack components (bottom-up order)
 │   ├── opensas-stack/     # Umbrella chart (deploys all layers)
-│   ├── opensas-teleport/  # Mesh & Connectivity (Layer 0)
-│   ├── opensas-interfaces/
-│   ├── opensas-orchestration/
-│   ├── opensas-data-privacy/
-│   └── opensas-infra/
+│   ├── opensas-teleport/  # Layer 0 — Mesh & Connectivity
+│   ├── opensas-infra/     # Layer 1 — Infrastructure & Day-2
+│   ├── opensas-data-privacy/ # Layer 2 — Data & Privacy
+│   ├── opensas-orchestration/ # Layer 3 — App & Orchestration
+│   └── opensas-interfaces/ # Layer 4 — Interfaces
 │
 ├── config/                # Reference configs & examples
 │   ├── teleport/          # Teleport cluster config, roles, RBAC
@@ -91,13 +91,14 @@ Conventional Commits format:
 [optional body]
 ```
 Types: `feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `ci`, `style`, `perf`
-Scopes: `infra`, `mesh`, `interfaces`, `orchestration`, `data`, `charts`, `docs`, `ci`
+Scopes (in stack order): `mesh`, `infra`, `data`, `orchestration`, `interfaces`, `charts`, `docs`, `ci`
 
 Examples:
 - `feat(mesh): add Teleport Helm chart with WireGuard underlay`
 - `feat(infra): add vLLM Helm chart with GPU tolerations`
-- `fix(orchestration): correct n8n webhook secret injection`
 - `docs(data): document pgvector connection pooling`
+- `fix(orchestration): correct n8n webhook secret injection`
+- `feat(interfaces): configure LibreChat auth provider
 
 ---
 
