@@ -4,15 +4,15 @@
 
 This repository contains the **Sovereign Automation Stack (OpenSAS)** — a turnkey, zero-data-leak, fully private AI and automation infrastructure deployed within secure environments (VPC or on-premise bare-metal). The one-pager at `opensas.md` is the canonical architecture reference.
 
-The stack is a 5-tier modular architecture built bottom-up (Layer 0 is the foundational mesh, Layer 4 is the user-facing interface):
+The stack is a 5-tier modular architecture (Layer 0 is the foundational mesh, Layer 4 is the user-facing interface — table is descending from highest abstraction to lowest):
 
 | Layer | Name | Core Components |
 |-------|------|----------------|
-| **0** | Mesh & Connectivity | Teleport (Community Edition), WireGuard, node enrollment & trust propagation |
-| **1** | Infrastructure & Day-2 | vLLM, LiteLLM Proxy, OpenBao, Phoenix (Arize) / Langfuse, Grafana |
-| **2** | Data & Privacy | MinIO, Qdrant/Milvus/pgvector, IAM Policy Mapping |
-| **3** | App & Orchestration | n8n (self-hosted), MCP Servers, Python/FastAPI microservices |
 | **4** | Interfaces | LibreChat, Slack/Discord/Mattermost bots, Streamlit, Chainlit |
+| **3** | App & Orchestration | n8n (self-hosted), MCP Servers, Python/FastAPI microservices |
+| **2** | Data & Privacy | MinIO, Qdrant/Milvus/pgvector, IAM Policy Mapping |
+| **1** | Infrastructure & Day-2 | vLLM, LiteLLM Proxy, OpenBao, Phoenix (Arize) / Langfuse, Grafana |
+| **0** | Mesh & Connectivity | Teleport (Community Edition), WireGuard, node enrollment & trust propagation |
 
 ---
 

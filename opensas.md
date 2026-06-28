@@ -16,11 +16,11 @@ Our consultancy delivers an enterprise-grade, production-tested AI blueprint eng
 
 | Layer | Primary Functions | Core Components & Technologies |
 | --- | --- | --- |
-| **0. Mesh & Connectivity** | Zero-trust cluster mesh, secure node-to-node communication, identity-aware SSH/access, and multi-cluster federation across the VPS fleet. | Teleport (Community Edition), WireGuard kernel encryption |
-| **1. Infrastructure & Day-2** | Local inference engine, secure API routing, observability, and cost/eval tracking. | vLLM, LiteLLM Proxy, OpenBao, Phoenix (Arize) / Langfuse, Grafana |
-| **2. Data & Privacy** | Secure document storage, localized semantic search, and user permission mapping. | MinIO (S3-compat), Qdrant / Milvus / pgvector, IAM Policy Mapping |
-| **3. App & Orchestration** | Visual workflow building, custom agent runtimes, and local tool/data calling. | Self-hosted n8n, Model Context Protocol (MCP) Servers, Python/FastAPI |
 | **4. Interfaces** | Workspace collaboration, interactive chat portals, and rapid prototyping tools. | LibreChat, Slack / Discord / Mattermost bots, Streamlit, Chainlit |
+| **3. App & Orchestration** | Visual workflow building, custom agent runtimes, and local tool/data calling. | Self-hosted n8n, Model Context Protocol (MCP) Servers, Python/FastAPI |
+| **2. Data & Privacy** | Secure document storage, localized semantic search, and user permission mapping. | MinIO (S3-compat), Qdrant / Milvus / pgvector, IAM Policy Mapping |
+| **1. Infrastructure & Day-2** | Local inference engine, secure API routing, observability, and cost/eval tracking. | vLLM, LiteLLM Proxy, OpenBao, Phoenix (Arize) / Langfuse, Grafana |
+| **0. Mesh & Connectivity** | Zero-trust cluster mesh, secure node-to-node communication, identity-aware SSH/access, and multi-cluster federation across the VPS fleet. | Teleport (Community Edition), WireGuard kernel encryption |
 
 ---
 
