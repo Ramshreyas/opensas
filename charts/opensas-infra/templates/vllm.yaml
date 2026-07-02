@@ -1,0 +1,131 @@
+{{- if .Values.vllm.enabled }}
+{{- if .Values.vllm.modelCache.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-vllm-model-cache
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opensas-infra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.vllm.modelCache.size }}
+  {{- if .Values.vllm.modelCache.storageClassName }}
+  storageClassName: {{ .Values.vllm.modelCache.storageClassName }}
+  {{- end }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-vllm
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opensas-infra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: inference
+spec:
+  replicas: {{ .Values.vllm.replicas }}
+  selector:
+    matchLabels:
+      {{- include "opensas-infra.vllm.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: Recreate  # GPU workloads need exclusive GPU access
+  template:
+    metadata:
+      labels:
+        {{- include "opensas-infra.vllm.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.vllm.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.vllm.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: vllm
+          image: "{{ .Values.vllm.image.repository }}:{{ .Values.vllm.image.tag }}"
+          imagePullPolicy: {{ .Values.vllm.image.pullPolicy }}
+          command:
+            - python3
+            - -m
+            - vllm.entrypoints.openai.api_server
+          args:
+            - --model
+            - {{ include "opensas-infra.vllm.modelArgs" . }}
+            {{- range .Values.vllm.args }}
+            - {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: VLLM_API_KEY
+              value: "not-used"  # Auth handled by LiteLLM, not vLLM directly
+            - name: HF_HOME
+              value: /models-cache
+            - name: HUGGINGFACE_HUB_CACHE
+              value: /models-cache
+          {{- with .Values.vllm.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            {{- if .Values.vllm.modelCache.enabled }}
+            - name: model-cache
+              mountPath: /models-cache
+            {{- end }}
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+        {{- if .Values.vllm.modelCache.enabled }}
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-vllm-model-cache
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-vllm
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opensas-infra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: inference
+spec:
+  type: {{ .Values.vllm.service.type }}
+  ports:
+    - port: {{ .Values.vllm.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "opensas-infra.vllm.selectorLabels" . | nindent 4 }}
+{{- end }}

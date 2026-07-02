@@ -129,7 +129,44 @@ as a drop-in replacement for Headscale by updating `mesh.provider: teleport` in
 
 ## Layer 1 — Infrastructure & Day-2 Operations
 
-> To be documented in Phase 2.
+**Phase 2 output.** Kubernetes core with GPU passthrough, secrets management, and observability.
+
+### Overview
+
+Layer 1 sits on top of the Layer 0 mesh. It provides a lightweight Kubernetes cluster (k3s) optimized for multi-node VPS fleets. Node networking is routed entirely over the Tailscale underlay (Flannel via `tailscale0`), ensuring all K8s API and pod-to-pod traffic is WireGuard-encrypted.
+
+This layer handles the heavy lifting of AI workloads: GPU resource allocation (via NVIDIA GPU Operator), model inference (vLLM), and API routing (LiteLLM proxy).
+
+### Components
+
+| Component | Role | Deployed via |
+|-----------|------|--------------|
+| **k3s** | Lightweight K8s orchestrator. Control-plane nodes run `server`, others run `agent`. | Ansible |
+| **NVIDIA GPU Operator** | Automates provisioning of NVIDIA software components on K8s (driver, container toolkit, device plugin). | Helm (`nvidia`) |
+| **vLLM** | High-throughput memory-efficient LLM serving engine. Deployed with PagedAttention and continuous batching enabled. | Helm (`opensas-infra`) |
+| **LiteLLM** | API Gateway. Provides a unified OpenAI-compatible endpoint, load balancing, cost tracking, and rate limiting. | Helm (`opensas-infra`) |
+| **OpenBao** | Self-hosted Vault alternative for secrets management and injection. | Helm (`opensas-infra`) |
+| **Prometheus & Grafana** | Cluster and GPU observability stack (metrics aggregation). | Helm (`kube-prometheus-stack`) |
+| **Langfuse** | LLM tracing observability. Captures prompt chains, latency, and token metrics from LiteLLM. | Helm (`opensas-infra`) |
+
+### Topology & Traffic Flow
+
+1. **Inference Request:** A service (e.g., LibreChat in Layer 4) sends an OpenAI-formatted request to `http://opensas-infra-litellm.opensas.svc.cluster.local:4000`.
+2. **Routing & Auth:** LiteLLM validates the API key, checks rate limits, and routes the request.
+3. **Tracing:** LiteLLM asynchronously sends a start trace event to the Langfuse backend.
+4. **Execution:** The request hits `http://opensas-infra-vllm.opensas.svc.cluster.local:8000`. vLLM schedules the prompt on the GPU and streams the generated tokens back.
+5. **Completion:** LiteLLM logs the total cost/tokens and sends the final trace to Langfuse.
+
+### GPU Scheduling
+
+Nodes with GPUs are labeled during bootstrap (`nvidia.com/gpu=true`, `node.opensas.io/role=gpu`). 
+The `opensas-infra` chart uses these labels via `nodeSelector` and `tolerations` to ensure vLLM pods land on nodes with matching hardware and exclusive GPU access.
+
+### Tracing Pipeline
+
+Tracing is the most fragile link in LLM infrastructure. OpenSAS uses Langfuse (v2), integrated via LiteLLM's `success_callback` and `failure_callback`. 
+- **LiteLLM** injects Langfuse keys as environment variables (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`).
+- Traces capture not just the prompt and completion, but the exact cost (calculated by LiteLLM) and latency per token.
 
 ---
 

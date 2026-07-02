@@ -1,0 +1,281 @@
+---
+# playbooks/k8s-bootstrap.yml — Bootstrap the K8s cluster (k3s) with GPU support
+#
+# Installs k3s on all nodes, configures the control-plane server and GPU/worker agents,
+# sets up Tailscale IP inter-node communication, applies node labels, and deploys
+# the NVIDIA GPU Operator for GPU workload scheduling.
+#
+# Usage:
+#   ansible-playbook -i inventory/<stack>/hosts.yml playbooks/k8s-bootstrap.yml
+#
+# Idempotent: safe to re-run. Already-installed k3s nodes are detected and skipped.
+# Single-node dev: same-machine control-plane+GPU handled correctly via localhost.
+
+- name: Bootstrap K8s cluster (k3s)
+  hosts: all
+  gather_facts: true
+  vars:
+    k3s_version: v1.32.6+k3s1
+    k3s_config_dir: /etc/rancher/k3s
+    k3s_data_dir: /var/lib/rancher/k3s
+    gpu_operator_version: 26.3.3
+    gpu_operator_namespace: gpu-operator
+    opensas_namespace: opensas
+
+    # Use Tailscale IP for k3s inter-node communication when mesh is active
+    # Falls back to ansible_host (loopback) for single-node dev
+    k3s_node_ip: "{{ tailscale_ip | default(ansible_host) }}"
+
+  tasks:
+    # ── Pre-flight checks ───────────────────────────────────────────────────
+
+    - name: Detect if k3s is already installed on this node
+      ansible.builtin.stat:
+        path: /usr/local/bin/k3s
+      register: _k3s_binary
+
+    - name: Detect k3s node type (server or agent)
+      ansible.builtin.stat:
+        path: "{{ k3s_config_dir }}/k3s.yaml"
+      register: _k3s_config_exists
+
+    - name: Set k3s-installed facts
+      ansible.builtin.set_fact:
+        k3s_already_installed: "{{ _k3s_binary.stat.exists }}"
+        k3s_already_configured: "{{ _k3s_config_exists.stat.exists }}"
+
+    - name: Show detected k3s state
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: k3s installed={{ k3s_already_installed }},
+          configured={{ k3s_already_configured }},
+          roles={{ node_roles | default(hostvars[inventory_hostname].get('node_roles', [])) }},
+          ip={{ k3s_node_ip }}
+
+    # ── Install k3s server (control-plane node) ─────────────────────────────
+
+    - name: Install k3s server on control-plane node
+      when:
+        - "'control-plane' in (node_roles | default([]))"
+        - not k3s_already_installed
+      block:
+        - name: Install k3s server
+          ansible.builtin.shell: |
+            curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ k3s_version }}" \
+              sh -s - server \
+              --node-ip="{{ k3s_node_ip }}" \
+              --advertise-address="{{ k3s_node_ip }}" \
+              --flannel-iface="tailscale0" \
+              --disable=traefik \
+              --disable=servicelb \
+              --write-kubeconfig-mode=644
+          args:
+            creates: /usr/local/bin/k3s
+          register: _k3s_server_install
+
+        - name: Wait for k3s server to be ready
+          ansible.builtin.command: k3s kubectl get nodes
+          register: _k3s_nodes
+          until: _k3s_nodes.rc == 0
+          retries: 30
+          delay: 5
+
+    - name: Fetch k3s node token from server (for agent enrollment)
+      when:
+        - "'control-plane' in (node_roles | default([]))"
+      ansible.builtin.slurp:
+        src: /var/lib/rancher/k3s/server/node-token
+      register: _k3s_node_token_raw
+
+    - name: Set k3s token fact
+      ansible.builtin.set_fact:
+        k3s_node_token: "{{ _k3s_node_token_raw.content | b64decode | trim }}"
+      when: _k3s_node_token_raw is defined and not _k3s_node_token_raw.failed
+
+    # ── Install k3s agents (GPU, storage, worker nodes) ────────────────────
+
+    - name: Install k3s agent on non-control-plane nodes
+      when:
+        - "'control-plane' not in (node_roles | default([]))"
+        - not k3s_already_installed
+        - k3s_node_token is defined
+      block:
+        - name: Determine k3s server URL
+          ansible.builtin.set_fact:
+            _k3s_server_url: "https://{{ hostvars[item].k3s_node_ip }}:6443"
+          loop: "{{ groups['control_plane'] | default([]) }}"
+          when: hostvars[item].k3s_node_ip is defined
+
+        - name: Install k3s agent
+          ansible.builtin.shell: |
+            curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ k3s_version }}" \
+              K3S_URL="{{ _k3s_server_url }}" \
+              K3S_TOKEN="{{ k3s_node_token }}" \
+              sh -s - agent \
+              --node-ip="{{ k3s_node_ip }}" \
+              --flannel-iface="tailscale0"
+          args:
+            creates: /usr/local/bin/k3s
+          register: _k3s_agent_install
+
+    # ── Apply node labels ────────────────────────────────────────────────────
+
+    - name: Label GPU nodes
+      when: "'gpu' in (node_roles | default([]))"
+      ansible.builtin.command:
+        cmd: >-
+          k3s kubectl label node {{ inventory_hostname }}
+          nvidia.com/gpu=true
+          node.opensas.io/role=gpu
+          --overwrite
+      register: _label_gpu
+      changed_when: "'labeled' in _label_gpu.stdout or _label_gpu.rc == 0"
+      failed_when: _label_gpu.rc != 0 and 'already' not in _label_gpu.stderr
+      delegate_to: "{{ groups['control_plane'][0] }}"
+
+    - name: Label storage nodes
+      when: "'storage' in (node_roles | default([]))"
+      ansible.builtin.command:
+        cmd: >-
+          k3s kubectl label node {{ inventory_hostname }}
+          node.opensas.io/role=storage
+          --overwrite
+      register: _label_storage
+      changed_when: "'labeled' in _label_storage.stdout or _label_storage.rc == 0"
+      failed_when: _label_storage.rc != 0 and 'already' not in _label_storage.stderr
+      delegate_to: "{{ groups['control_plane'][0] }}"
+
+    - name: Label worker nodes
+      when: "'worker' in (node_roles | default([]))"
+      ansible.builtin.command:
+        cmd: >-
+          k3s kubectl label node {{ inventory_hostname }}
+          node.opensas.io/role=worker
+          --overwrite
+      register: _label_worker
+      changed_when: "'labeled' in _label_worker.stdout or _label_worker.rc == 0"
+      failed_when: _label_worker.rc != 0 and 'already' not in _label_worker.stderr
+      delegate_to: "{{ groups['control_plane'][0] }}"
+
+    # ── NVIDIA GPU Operator ──────────────────────────────────────────────────
+
+    - name: Create GPU operator namespace
+      ansible.builtin.command:
+        cmd: k3s kubectl create namespace {{ gpu_operator_namespace }}
+      register: _ns_create
+      changed_when: "'created' in _ns_create.stdout"
+      failed_when: _ns_create.rc != 0 and 'already exists' not in _ns_create.stderr
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      when: "'gpu' in (node_roles | default([]))"
+
+    - name: Add NVIDIA Helm repository
+      ansible.builtin.command:
+        cmd: helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
+      register: _repo_add
+      changed_when: "'has been added' in _repo_add.stdout"
+      failed_when: _repo_add.rc != 0 and 'already exists' not in _repo_add.stderr
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+      when: "'control-plane' in (node_roles | default([]))"
+
+    - name: Update Helm repositories
+      ansible.builtin.command:
+        cmd: helm repo update
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+      when: "'control-plane' in (node_roles | default([]))"
+
+    - name: Check if GPU operator is already installed
+      ansible.builtin.command:
+        cmd: helm status gpu-operator -n {{ gpu_operator_namespace }}
+      register: _gpu_op_status
+      failed_when: false
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+      when: "'control-plane' in (node_roles | default([]))"
+
+    - name: Deploy NVIDIA GPU Operator
+      ansible.builtin.command:
+        cmd: >-
+          helm upgrade --install gpu-operator nvidia/gpu-operator
+          --namespace {{ gpu_operator_namespace }}
+          --version {{ gpu_operator_version }}
+          --set operator.defaultRuntime=containerd
+          --set toolkit.env[0].name=CONTAINERD_CONFIG
+          --set toolkit.env[0].value=/var/lib/rancher/k3s/agent/etc/containerd/config.toml
+          --set toolkit.env[1].name=CONTAINERD_SOCKET
+          --set toolkit.env[1].value=/run/k3s/containerd/containerd.sock
+          --wait
+          --timeout 10m
+      register: _gpu_op_install
+      changed_when: "'STATUS: deployed' in _gpu_op_install.stdout"
+      when:
+        - "'control-plane' in (node_roles | default([]))"
+        - "'gpu' in (node_roles | default([])) or groups['gpu'] | default([]) | length > 0"
+        - _gpu_op_status.rc != 0  # not already installed
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+
+    # ── Create opensas namespace ─────────────────────────────────────────────
+
+    - name: Create opensas namespace
+      ansible.builtin.command:
+        cmd: k3s kubectl create namespace {{ opensas_namespace }}
+      register: _opensas_ns
+      changed_when: "'created' in _opensas_ns.stdout"
+      failed_when: _opensas_ns.rc != 0 and 'already exists' not in _opensas_ns.stderr
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+      when: "'control-plane' in (node_roles | default([]))"
+
+  # ── Post-tasks: verification ────────────────────────────────────────────
+
+  post_tasks:
+    - name: Show node status
+      ansible.builtin.command:
+        cmd: k3s kubectl get nodes -o wide
+      register: _nodes_output
+      changed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+      when: "'control-plane' in (node_roles | default([]))"
+
+    - name: Display cluster nodes
+      ansible.builtin.debug:
+        msg:
+          - "K8s cluster nodes:"
+          - "{{ _nodes_output.stdout_lines }}"
+      when: _nodes_output is defined
+
+    - name: Show GPU allocatable resources
+      ansible.builtin.command:
+        cmd: >-
+          k3s kubectl describe nodes -l nvidia.com/gpu=true 2>/dev/null |
+          grep -A2 "Capacity:" | head -20
+      register: _gpu_capacity
+      changed_when: false
+      failed_when: false
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+      when: "'control-plane' in (node_roles | default([]))"
+
+    - name: Display GPU capacity
+      ansible.builtin.debug:
+        msg:
+          - "GPU node resources:"
+          - "{{ _gpu_capacity.stdout_lines }}"
+      when: _gpu_capacity.stdout_lines | default([]) | length > 0
+
+    - name: Display cluster bootstrap summary
+      ansible.builtin.debug:
+        msg:
+          - "✅ K8s cluster bootstrap complete."
+          - "Control plane: {{ groups['control_plane'] | default([]) | join(', ') }}"
+          - "GPU nodes: {{ groups['gpu'] | default([]) | join(', ') }}"
+          - "Storage nodes: {{ groups['storage'] | default([]) | join(', ') }}"
+          - "Worker nodes: {{ groups['worker'] | default([]) | join(', ') }}"
+          - ""
+          - "Next: deploy infrastructure charts —"
+          - "  helm upgrade --install opensas-infra ./charts/opensas-infra -n opensas"

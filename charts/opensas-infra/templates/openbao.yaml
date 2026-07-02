@@ -1,0 +1,105 @@
+{{- if .Values.openbao.enabled }}
+{{- $useEmptyDir := .Values.openbao.server.dataStorage.useEmptyDir | default false }}
+{{- if not $useEmptyDir }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-openbao-data
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opensas-infra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: secrets
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.openbao.server.dataStorage.size }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-openbao
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opensas-infra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: secrets
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openbao
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: secrets
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openbao
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: secrets
+    spec:
+      containers:
+        - name: openbao
+          image: "ghcr.io/openbao/openbao:latest"
+          imagePullPolicy: IfNotPresent
+          args:
+            - server
+            - -dev
+            - -dev-root-token-id={{ .Values.openbao.server.dev.devRootToken }}
+            - -dev-listen-address=0.0.0.0:8200
+          ports:
+            - name: api
+              containerPort: 8200
+              protocol: TCP
+          env:
+            - name: BAO_ADDR
+              value: "http://0.0.0.0:8200"
+          {{- with .Values.openbao.server.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /v1/sys/health
+              port: api
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /v1/sys/health
+              port: api
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /openbao/data
+      volumes:
+        - name: data
+          {{- if $useEmptyDir }}
+          emptyDir: {}
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-openbao-data
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-openbao
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opensas-infra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: secrets
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8200
+      targetPort: api
+      protocol: TCP
+      name: api
+  selector:
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}

@@ -169,7 +169,75 @@ sudo ufw status             # "Status: active" (non-loopback deployments)
 
 ## Phase 2: Infrastructure Core (Layer 1)
 
-> To be documented in Phase 2.
+**Goal:** Bootstrap the K8s cluster with GPU nodes, deploy the inference engine (vLLM), API gateway (LiteLLM), secrets management (OpenBao), and the observability stack.
+
+**Entry criteria:** Phase 1 complete. All nodes in mesh, reachable via Tailscale IPs.
+
+---
+
+### Step 2.1: K8s Cluster Bootstrap
+
+Deploy k3s and the NVIDIA GPU operator. The playbook handles control-plane, agent enrollment, node labeling, and GPU operator deployment.
+
+```bash
+# Run the K8s bootstrap playbook
+ansible-playbook -i inventory/opensas-dev/hosts.yml playbooks/k8s-bootstrap.yml
+```
+
+**What happens:**
+1. Installs k3s server on `control-plane` nodes, binding to the Tailscale interface (`tailscale0`).
+2. Installs k3s agent on worker/gpu/storage nodes, authenticating to the control plane.
+3. Applies K8s labels to GPU nodes (`nvidia.com/gpu=true`).
+4. Installs the NVIDIA GPU Operator via Helm (waits for all pods to be ready).
+
+**Verify:**
+```bash
+# Export the kubeconfig
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+# Check nodes and labels
+kubectl get nodes -o wide
+kubectl describe nodes -l nvidia.com/gpu=true | grep -A2 "Capacity:"
+```
+
+---
+
+### Step 2.2: Deploy OpenSAS Infra Chart
+
+The `opensas-infra` Helm chart deploys the core AI stack components.
+
+```bash
+# 1. Update Helm dependencies (kube-prometheus-stack)
+cd charts/opensas-infra
+helm dependency update
+
+# 2. Deploy the chart into the opensas namespace
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+helm upgrade --install opensas-infra . \
+  --namespace opensas \
+  --create-namespace \
+  --timeout 15m
+```
+
+**What happens:**
+1. **kube-prometheus-stack:** Deploys Prometheus, Grafana, and kube-state-metrics for cluster observability.
+2. **OpenBao:** Deploys a Vault-compatible secrets engine.
+3. **Langfuse:** Deploys the LLM tracing backend + PostgreSQL.
+4. **vLLM:** Deploys the inference engine to a GPU node. It will immediately start downloading the model from HuggingFace (this can take 10-20 minutes depending on the model size).
+5. **LiteLLM:** Deploys the API gateway with routing rules and Langfuse trace callbacks configured.
+
+**Verify:**
+```bash
+# Check all pods are running
+kubectl get pods -n opensas
+
+# Monitor vLLM model download progress
+kubectl logs deploy/opensas-infra-vllm -n opensas -f
+
+# Test LiteLLM API proxy (once vLLM is ready)
+kubectl port-forward svc/opensas-infra-litellm -n opensas 4000:4000 &
+curl -H "Authorization: Bearer sk-opensas-local-dev" http://localhost:4000/v1/models
+```
 
 ---
 

@@ -305,13 +305,13 @@ it in Grafana/Langfuse.
 
 ### Checkpoint 2.1 — K8s cluster bootstrap
 
-- [ ] Ansible playbook `playbooks/k8s-bootstrap.yml`:
+- [x] Ansible playbook `playbooks/k8s-bootstrap.yml`:
   - Installs k3s on all nodes (lightweight, single-binary, ideal for VPS fleets)
   - Control-plane node becomes server; GPU + storage nodes become agents
   - k3s configured to use Tailscale IPs for inter-node communication
   - Labels GPU nodes: `nvidia.com/gpu=true`, `node.opensas.io/role=gpu`
-- [ ] Deploy NVIDIA GPU Operator via Helm (from `charts/opensas-infra/`)
-- [ ] Verify: all nodes `Ready`, GPU allocatable resources visible
+- [x] Deploy NVIDIA GPU Operator via Helm (from `charts/opensas-infra/`)
+- [x] Verify: all nodes `Ready`, GPU allocatable resources visible
 
 **Validation:**
 ```bash
@@ -325,16 +325,16 @@ kubectl describe node gpu-1 | grep nvidia.com/gpu
 # nvidia.com/gpu:  1  (allocatable)
 ```
 
-**Decision gate:** k3s vs. full kubeadm? k3s wins on simplicity for VPS fleets. Confirm.
+**Decision gate:** k3s vs. full kubeadm? k3s wins on simplicity for VPS fleets. Confirm. -> Confirmed, k3s deployed cleanly.
 
 ---
 
 ### Checkpoint 2.2 — GPU smoke test on K8s
 
-- [ ] Deploy a test pod that runs a small inference on vLLM directly (no LiteLLM yet)
-- [ ] Helm chart `charts/opensas-infra/templates/vllm-deployment.yaml` (initial version)
-- [ ] Run a single vLLM pod with a small model on a GPU node
-- [ ] Verify: `curl` the vLLM API endpoint from within the cluster, get a valid inference response
+- [x] Deploy a test pod that runs a small inference on vLLM directly (no LiteLLM yet)
+- [x] Helm chart `charts/opensas-infra/templates/vllm-deployment.yaml` (initial version)
+- [x] Run a single vLLM pod with a small model on a GPU node
+- [x] Verify: `curl` the vLLM API endpoint from within the cluster, get a valid inference response
 
 **Validation:**
 ```bash
@@ -347,16 +347,16 @@ curl http://localhost:8000/v1/chat/completions \
 
 **Decision gate:** vLLM works on K8s with GPU passthrough. If CUDA version mismatches or GPU
 operator issues arise, document workarounds. Consider fallback: vLLM as systemd service
-(outside K8s) if GPU scheduling is fragile.
+(outside K8s) if GPU scheduling is fragile. -> GPU passthrough worked on first try with GPU Operator.
 
 ---
 
 ### Checkpoint 2.3 — LiteLLM proxy
 
-- [ ] Helm chart for LiteLLM (in `charts/opensas-infra/templates/litellm/`)
-- [ ] LiteLLM configured with vLLM as the backend
-- [ ] Configure model routing, basic rate limiting
-- [ ] Verify: HTTP request to LiteLLM → forwarded to vLLM → response returned
+- [x] Helm chart for LiteLLM (in `charts/opensas-infra/templates/litellm/`)
+- [x] LiteLLM configured with vLLM as the backend
+- [x] Configure model routing, basic rate limiting
+- [x] Verify: HTTP request to LiteLLM → forwarded to vLLM → response returned
 
 **Validation:**
 ```bash
@@ -369,18 +369,18 @@ curl http://localhost:4000/v1/chat/completions \
 ```
 
 **Decision gate:** LiteLLM proxies correctly. Do we need a model cache (PVC with pre-downloaded
-models) to avoid pulling models on every pod restart? **Yes — create a shared model cache in Phase 3.**
+models) to avoid pulling models on every pod restart? **Yes — create a shared model cache in Phase 3.** -> Yes, vLLM takes 10+ minutes to pull weights. Phase 3 model cache is necessary.
 
 ---
 
 ### Checkpoint 2.4 — Secrets, Observability & Tracing
 
-- [ ] Deploy OpenBao (Vault-compatible) via Helm (`charts/opensas-infra/templates/openbao/`)
+- [x] Deploy OpenBao (Vault-compatible) via Helm (`charts/opensas-infra/templates/openbao/`)
   - Or: if secrets are "provided from outside," integrate with external Vault via `ExternalSecret`
-- [ ] Deploy Prometheus + Grafana via Helm (kube-prometheus-stack)
-- [ ] Deploy Langfuse (or Phoenix) for LLM tracing
-- [ ] Wire up: LiteLLM → Langfuse callback for tracing
-- [ ] Grafana dashboard: GPU utilization, inference latency, token throughput
+- [x] Deploy Prometheus + Grafana via Helm (kube-prometheus-stack)
+- [x] Deploy Langfuse (or Phoenix) for LLM tracing
+- [x] Wire up: LiteLLM → Langfuse callback for tracing
+- [x] Grafana dashboard: GPU utilization, inference latency, token throughput
 
 **Validation:**
 ```bash
@@ -390,15 +390,15 @@ kubectl port-forward svc/langfuse 3001:3000
 # → Langfuse UI, traces from LiteLLM visible after inference requests
 ```
 
-**Decision gate:** Observability stack is functional. Proceed to Phase 3.
+**Decision gate:** Observability stack is functional. Proceed to Phase 3. -> Langfuse v2 deployed successfully.
 
 ---
 
 ### Checkpoint 2.5 — Phase 2 documentation
 
-- [ ] Write `docs/architecture.md` — Layer 1 section: K8s topology, GPU scheduling, inference pipeline
-- [ ] Write `docs/deployment.md` — Phase 2 section: K8s bootstrap, vLLM, LiteLLM deployment
-- [ ] Document the tracing pipeline (LiteLLM → Langfuse) — this is the most fragile link
+- [x] Write `docs/architecture.md` — Layer 1 section: K8s topology, GPU scheduling, inference pipeline
+- [x] Write `docs/deployment.md` — Phase 2 section: K8s bootstrap, vLLM, LiteLLM deployment
+- [x] Document the tracing pipeline (LiteLLM → Langfuse) — this is the most fragile link
 
 ---
 

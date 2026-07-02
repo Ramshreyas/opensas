@@ -1,0 +1,236 @@
+# OpenSAS Infra — Layer 1 values
+# =============================================================================
+# Each component can be enabled/disabled independently.
+# For the dev config (opensas.dev.yaml), all are enabled on a single node.
+
+global:
+  stackName: opensas-dev
+  stackDomain: opensas.local
+
+# ── vLLM Inference Engine ────────────────────────────────────────────────────
+vllm:
+  enabled: true
+  replicas: 1
+  image:
+    repository: vllm/vllm-openai
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  # Model configuration
+  models:
+    - name: Qwen/Qwen2.5-7B-Instruct
+      quantization: null
+
+  # Server args
+  args:
+    - --host
+    - "0.0.0.0"
+    - --port
+    - "8000"
+    - --max-model-len
+    - "32768"
+    - --gpu-memory-utilization
+    - "0.92"
+    - --dtype
+    - "auto"
+
+  # GPU resources
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+    requests:
+      nvidia.com/gpu: 1
+      memory: "16Gi"
+      cpu: "4"
+
+  # Shared model cache PVC
+  modelCache:
+    enabled: false           # Phase 3: enable with shared PVC or MinIO
+    size: 50Gi
+    storageClassName: ""     # Uses default StorageClass
+
+  # Service
+  service:
+    type: ClusterIP
+    port: 8000
+
+  # Node selection
+  nodeSelector:
+    nvidia.com/gpu: "true"
+
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+
+# ── LiteLLM API Proxy ────────────────────────────────────────────────────────
+litellm:
+  enabled: true
+  replicas: 1
+  image:
+    repository: ghcr.io/berriai/litellm
+    tag: main-latest
+    pullPolicy: IfNotPresent
+
+  # vLLM backend (resolved from vllm.service values)
+  backend:
+    vllm:
+      endpoint: http://vllm.opensas.svc.cluster.local:8000
+
+  # Rate limiting from opensas.yaml routing.litellm
+  rateLimit:
+    tokensPerMin: 10000
+
+  # LiteLLM server args
+  args:
+    - --port
+    - "4000"
+    - --host
+    - "0.0.0.0"
+
+  # Master key for LiteLLM (override via secrets)
+  masterKey: sk-opensas-local-dev
+
+  # Database (PostgreSQL required by LiteLLM)
+  postgresql:
+    enabled: true
+    image:
+      repository: postgres
+      tag: "16-alpine"
+    auth:
+      username: litellm
+      password: litellm-dev
+      database: litellm
+    persistence:
+      enabled: true
+      size: 5Gi
+      useEmptyDir: true
+
+  database:
+    url: ""  # Computed in template from postgresql values
+
+  # Resources
+  resources:
+    limits:
+      memory: "2Gi"
+      cpu: "2"
+    requests:
+      memory: "512Mi"
+      cpu: "500m"
+
+  # Service
+  service:
+    type: ClusterIP
+    port: 4000
+
+  # Persistence for SQLite DB
+  persistence:
+    enabled: true
+    size: 5Gi
+    useEmptyDir: true  # Use emptyDir for dev (avoids PV provisioner issues)
+
+# ── OpenBao (Vault-compatible secrets) ───────────────────────────────────────
+openbao:
+  enabled: true
+  # Uses upstream openbao Helm chart
+  server:
+    dev:
+      enabled: true
+      devRootToken: "opensas-dev-root"
+    dataStorage:
+      enabled: true
+      size: 10Gi
+      useEmptyDir: true  # Use emptyDir for dev
+    resources:
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+      requests:
+        memory: "256Mi"
+        cpu: "250m"
+
+# ── Prometheus + Grafana ─────────────────────────────────────────────────────
+prometheus:
+  enabled: true
+
+# Upstream kube-prometheus-stack values
+kube-prometheus-stack:
+  prometheus:
+    prometheusSpec:
+      resources:
+        requests:
+          memory: "512Mi"
+          cpu: "500m"
+        limits:
+          memory: "2Gi"
+          cpu: "1"
+      retention: 7d
+  grafana:
+    enabled: true
+    adminPassword: opensas-admin
+    resources:
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+      requests:
+        memory: "256Mi"
+        cpu: "250m"
+    # Pre-configured dashboards
+    dashboards:
+      default:
+        opensas-gpu:
+          gnetId: 0        # placeholder — custom dashboards in Phase 4
+          datasource: Prometheus
+  alertmanager:
+    enabled: false
+  nodeExporter:
+    enabled: true
+  kubeStateMetrics:
+    enabled: true
+
+# ── Langfuse (LLM tracing) ───────────────────────────────────────────────────
+langfuse:
+  enabled: true
+  replicas: 1
+  image:
+    repository: ghcr.io/langfuse/langfuse
+    tag: "2"
+    pullPolicy: IfNotPresent
+
+  # Langfuse requires a Postgres database
+  postgresql:
+    enabled: true
+    image:
+      repository: postgres
+      tag: "16-alpine"
+    auth:
+      username: langfuse
+      password: langfuse-dev
+      database: langfuse
+    persistence:
+      enabled: true
+      size: 10Gi
+      useEmptyDir: true  # Use emptyDir for dev
+
+  # Langfuse config
+  salt: opensas-dev-salt
+  nextauthSecret: opensas-dev-nextauth-secret
+
+  # Resources
+  resources:
+    limits:
+      memory: "1Gi"
+      cpu: "1"
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+
+  # Service
+  service:
+    type: ClusterIP
+    port: 3000
+
+# ── NVIDIA GPU Operator ──────────────────────────────────────────────────────
+# Installed separately by k8s-bootstrap playbook, not managed by this chart.
+gpuOperator:
+  enabled: false

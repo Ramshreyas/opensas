@@ -1,0 +1,22 @@
+apiVersion: v2
+name: opensas-infra
+description: OpenSAS Layer 1 — Infrastructure Core (vLLM, LiteLLM, OpenBao, Observability)
+type: application
+version: 0.2.0
+appVersion: "0.2.0"
+keywords:
+  - opensas
+  - llm
+  - inference
+  - vllm
+  - litellm
+  - observability
+maintainers:
+  - name: OpenSAS
+    url: https://github.com/opensas/opensas
+
+dependencies:
+  - name: kube-prometheus-stack
+    version: ">=65.0.0"
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: prometheus.enabled

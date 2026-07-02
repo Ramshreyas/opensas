@@ -1,0 +1,230 @@
+{{- if .Values.litellm.enabled }}
+{{- $pgUseEmptyDir := .Values.litellm.postgresql.persistence.useEmptyDir | default false }}
+{{- $pgHost := printf "%s-litellm-postgresql" .Release.Name }}
+{{- $pgUrl := printf "postgresql://%s:%s@%s:5432/%s" .Values.litellm.postgresql.auth.username .Values.litellm.postgresql.auth.password $pgHost .Values.litellm.postgresql.auth.database }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-litellm-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opensas-infra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api-gateway
+data:
+  config.yaml: |
+    general_settings:
+      master_key: {{ .Values.litellm.masterKey }}
+      database_url: {{ $pgUrl }}
+
+    model_list:
+      - model_name: {{ (index .Values.vllm.models 0).name | default "default-model" }}
+        litellm_params:
+          model: openai/{{ (index .Values.vllm.models 0).name | default "default-model" }}
+          api_base: {{ .Values.litellm.backend.vllm.endpoint }}/v1
+          api_key: not-used
+          rpm: {{ div .Values.litellm.rateLimit.tokensPerMin 100 }}
+          timeout: 600
+          stream_timeout: 600
+
+    litellm_settings:
+      drop_params: true
+      set_verbose: false
+      num_retries: 3
+      request_timeout: 600
+
+    router_settings:
+      routing_strategy: usage-based-routing
+      allowed_fails: 3
+      num_retries: 3
+      fallbacks: []
+      context_window_fallbacks: []
+
+    {{- if .Values.langfuse.enabled }}
+    environment_variables:
+      LANGFUSE_HOST: http://{{ .Release.Name }}-langfuse.{{ .Release.Namespace }}.svc.cluster.local:3000
+      LANGFUSE_PUBLIC_KEY: pk-opensas-dev
+      LANGFUSE_SECRET_KEY: sk-opensas-dev
+    {{- end }}
+---
+# LiteLLM Postgres
+{{- if not $pgUseEmptyDir }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-litellm-postgresql
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opensas-infra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.litellm.postgresql.persistence.size }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $pgHost }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opensas-infra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+      targetPort: 5432
+      protocol: TCP
+      name: postgresql
+  selector:
+    app.kubernetes.io/name: litellm-postgresql
+    app.kubernetes.io/instance: {{ .Release.Name }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-litellm-postgresql
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opensas-infra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: litellm-postgresql
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: litellm-postgresql
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: postgresql
+          image: "{{ .Values.litellm.postgresql.image.repository }}:{{ .Values.litellm.postgresql.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.litellm.postgresql.auth.username | quote }}
+            - name: POSTGRES_PASSWORD
+              value: {{ .Values.litellm.postgresql.auth.password | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.litellm.postgresql.auth.database | quote }}
+          ports:
+            - containerPort: 5432
+              protocol: TCP
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+      volumes:
+        - name: data
+          {{- if $pgUseEmptyDir }}
+          emptyDir: {}
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-litellm-postgresql
+          {{- end }}
+---
+# LiteLLM Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-litellm
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opensas-infra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api-gateway
+spec:
+  replicas: {{ .Values.litellm.replicas }}
+  selector:
+    matchLabels:
+      {{- include "opensas-infra.litellm.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "opensas-infra.litellm.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: litellm
+          image: "{{ .Values.litellm.image.repository }}:{{ .Values.litellm.image.tag }}"
+          imagePullPolicy: {{ .Values.litellm.image.pullPolicy }}
+          args:
+            - --config
+            - /app/config/config.yaml
+            {{- range .Values.litellm.args }}
+            - {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 4000
+              protocol: TCP
+          env:
+            - name: LITELLM_MASTER_KEY
+              value: {{ .Values.litellm.masterKey | quote }}
+            - name: DATABASE_URL
+              value: {{ $pgUrl | quote }}
+            {{- if .Values.langfuse.enabled }}
+            - name: LANGFUSE_HOST
+              value: "http://{{ .Release.Name }}-langfuse.{{ .Release.Namespace }}.svc.cluster.local:3000"
+            - name: LANGFUSE_PUBLIC_KEY
+              value: "pk-opensas-dev"
+            - name: LANGFUSE_SECRET_KEY
+              value: "sk-opensas-dev"
+            {{- end }}
+          {{- with .Values.litellm.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health/readiness
+              port: http
+            initialDelaySeconds: 45
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}-litellm-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-litellm
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opensas-infra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api-gateway
+spec:
+  type: {{ .Values.litellm.service.type }}
+  ports:
+    - port: {{ .Values.litellm.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "opensas-infra.litellm.selectorLabels" . | nindent 4 }}
+{{- end }}
