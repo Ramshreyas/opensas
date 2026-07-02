@@ -1,0 +1,169 @@
+---
+# playbooks/tailscale-enroll.yml — Enroll all nodes into the Headscale mesh
+#
+# Installs Tailscale client on every node, enrolls them with the Headscale
+# control server using pre-auth keys, and enables Tailscale SSH (replaces
+# raw SSH key management).
+#
+# Idempotent: re-running does not break existing enrollments.
+#
+# Usage:
+#   ansible-playbook -i inventory/<stack>/hosts.yml playbooks/headscale.yml
+#   ansible-playbook -i inventory/<stack>/hosts.yml playbooks/tailscale-enroll.yml
+
+- name: Enroll all nodes in the Headscale mesh
+  hosts: all
+  gather_facts: true
+  vars:
+    opensas_state_dir: /etc/opensas
+    # Headscale server URL — derived from control-plane node IP
+    # For single-node dev, this will be localhost/127.0.0.1
+    headscale_server_url: >-
+      http://{{ hostvars[groups['control_plane'][0]]['ansible_host'] }}:8080
+
+  tasks:
+    # ------------------------------------------------------------------
+    # 1. Retrieve pre-auth key from control-plane node
+    # ------------------------------------------------------------------
+    - name: Read pre-auth key from control-plane node
+      ansible.builtin.slurp:
+        src: "{{ opensas_state_dir }}/headscale-preauth.key"
+      register: _preauth_raw
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+
+    - name: Set pre-auth key fact
+      ansible.builtin.set_fact:
+        _preauth_key: "{{ _preauth_raw.content | b64decode | trim }}"
+      run_once: true
+
+    # ------------------------------------------------------------------
+    # 2. Install Tailscale client
+    # ------------------------------------------------------------------
+    - name: Check if Tailscale is already installed
+      ansible.builtin.stat:
+        path: /usr/bin/tailscale
+      register: tailscale_binary
+
+    - name: Install Tailscale client
+      when: not tailscale_binary.stat.exists
+      block:
+        - name: Install Tailscale via official script
+          ansible.builtin.shell: |
+            curl -fsSL https://tailscale.com/install.sh | sh
+          args:
+            creates: /usr/bin/tailscale
+          changed_when: true
+
+        - name: Verify Tailscale installation
+          ansible.builtin.command:
+            cmd: tailscale --version
+          register: _ts_version
+          changed_when: false
+
+        - name: Show Tailscale version
+          ansible.builtin.debug:
+            msg: "Tailscale installed: {{ _ts_version.stdout_lines[0] | default('unknown') }}"
+
+    # ------------------------------------------------------------------
+    # 3. Check current enrollment status
+    # ------------------------------------------------------------------
+    - name: Check Tailscale status
+      ansible.builtin.command:
+        cmd: tailscale status --json
+      register: _ts_status
+      changed_when: false
+      failed_when: false
+
+    - name: Parse enrollment status
+      ansible.builtin.set_fact:
+        _is_enrolled: >-
+          {{ _ts_status.rc == 0 and
+             (_ts_status.stdout | from_json).Self.Online | default(false) }}
+        _current_backend: >-
+          {{ (_ts_status.stdout | from_json).CurrentTailnet.Name | default('')
+             if _ts_status.rc == 0 else '' }}
+
+    # ------------------------------------------------------------------
+    # 4. Enroll with Headscale
+    # ------------------------------------------------------------------
+    - name: Ensure OpenSAS state directory exists
+      ansible.builtin.file:
+        path: "{{ opensas_state_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Enroll node with Headscale
+      when: not _is_enrolled or 'headscale' not in headscale_server_url
+      block:
+        - name: Run tailscale up with Headscale login server
+          ansible.builtin.command:
+            cmd: >-
+              tailscale up
+              --login-server {{ headscale_server_url }}
+              --authkey {{ _preauth_key | quote }}
+              --accept-routes
+              --ssh
+              --hostname {{ inventory_hostname }}
+          register: _enroll
+          changed_when: true
+          # tailscale up may return non-zero if already partly enrolled;
+          # we treat as success if the node appears online after
+          failed_when: false
+
+        - name: Check enrollment result
+          ansible.builtin.fail:
+            msg: "Tailscale enrollment failed: {{ _enroll.stderr }}"
+          when:
+            - _enroll.rc != 0
+            - "'already' not in _enroll.stderr | default('')"
+            - "'connected' not in _enroll.stdout | default('')"
+
+    # ------------------------------------------------------------------
+    # 5. Configure Tailscale SSH
+    # ------------------------------------------------------------------
+    - name: Ensure Tailscale SSH is enabled
+      ansible.builtin.command:
+        cmd: tailscale set --ssh
+      changed_when: false
+      when:
+        - _is_enrolled or _enroll.changed | default(false)
+
+    # ------------------------------------------------------------------
+    # 6. Verify mesh connectivity
+    # ------------------------------------------------------------------
+    - name: Wait for node to appear online
+      ansible.builtin.command:
+        cmd: tailscale status --json
+      register: _final_status
+      changed_when: false
+      retries: 10
+      delay: 3
+      until:
+        - _final_status.rc == 0
+        - (_final_status.stdout | from_json).Self.Online | default(false)
+
+    - name: Report Tailscale IP
+      ansible.builtin.debug:
+        msg:
+          - "Node {{ inventory_hostname }} is online in the mesh"
+          - "Tailscale IP: {{ (_final_status.stdout | from_json).Self.TailscaleIPs[0] | default('pending') }}"
+          - "Tailscale SSH: ssh {{ ansible_user }}@{{ inventory_hostname }}.{{ stack_domain }}"
+
+  post_tasks:
+    - name: Collect Tailscale status from all nodes
+      ansible.builtin.command:
+        cmd: tailscale status
+      register: _mesh_status
+      changed_when: false
+
+    - name: Display mesh summary
+      ansible.builtin.debug:
+        msg:
+          - === OpenSAS Mesh Summary ===
+          - "Stack: {{ stack_name }}.{{ stack_domain }}"
+          - "Control server: {{ headscale_server_url }}"
+          - ""
+          - "{{ _mesh_status.stdout }}"
+      run_once: true
+      delegate_to: "{{ groups['control_plane'][0] }}"

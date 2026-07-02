@@ -1,0 +1,65 @@
+# opensas.dev.yaml — Minimal local development configuration
+# =============================================================================
+# This is the config you edit for local development. It targets a single-node
+# setup with the local GPU. The entire stack is validated and simulated on
+# this config before targeting real VPS fleets.
+# =============================================================================
+
+stack:
+  name: opensas-dev
+  domain: opensas.local
+
+mesh:
+  provider: headscale
+
+nodes:
+  - name: yoneda
+    ip: 127.0.0.1
+    roles:
+      - control-plane
+      - storage
+      - gpu
+    gpu:
+      vendor: nvidia
+      count: 1
+
+inference:
+  engine: vllm
+  models:
+    - name: Qwen/Qwen2.5-7B-Instruct
+      quantization: null
+
+routing:
+  litellm:
+    rate_limit_tokens_per_min: 10000
+
+secrets:
+  provider: openbao
+
+storage:
+  provider: minio
+  buckets:
+    - name: documents
+      quota_gb: 10
+    - name: models-cache
+
+observability:
+  tracing: langfuse
+  metrics: prometheus
+  dashboards: grafana
+
+orchestration:
+  n8n:
+    enabled: true
+    storage_gb: 10
+  mcp_servers:
+    - name: filesystem
+      type: stdio
+      mounts:
+        - /data
+
+interfaces:
+  librechat:
+    enabled: true
+  streamlit_apps: []
+  bots: []

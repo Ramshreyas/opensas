@@ -1,0 +1,145 @@
+# opensas.sample.yaml — Fully-documented sample configuration
+# =============================================================================
+# This file demonstrates every configuration option available in the
+# Sovereign Automation Stack. Use it as a reference when building your own
+# opensas.yaml. All values shown are documentation examples, not defaults.
+# =============================================================================
+
+# ── Stack Identity ─────────────────────────────────────────────────────────
+stack:
+  name: opensas-production          # Unique name. Used for resource naming & tagging.
+                                    # Pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+  domain: opensas.acme-corp.com     # Base domain for all services (TLS, ingress).
+
+# ── Layer 0: Mesh & Connectivity ──────────────────────────────────────────
+mesh:
+  provider: headscale               # headscale (default): open-source Tailscale-compatible
+                                    # teleport: enterprise-grade with session recording, RBAC, audit
+
+# ── Nodes: The VPS Fleet ───────────────────────────────────────────────────
+# At minimum: one control-plane node. Add GPU nodes for inference.
+# The architecture is hardware- and vendor-agnostic.
+nodes:
+  # Control plane node — runs the mesh server, K8s control plane, management services
+  - name: control-1
+    ip: 10.42.0.1
+    roles:
+      - control-plane                # Required: at least one per fleet
+      - storage                      # Optional: co-locate MinIO storage
+
+  # GPU worker node — runs inference workloads
+  - name: gpu-1
+    ip: 10.42.0.2
+    roles:
+      - gpu                          # Requires the `gpu` block below
+    gpu:
+      vendor: nvidia                 # nvidia | amd | intel
+      count: 1                       # Number of GPUs available on this node
+
+  # Additional GPU nodes can be added here as your fleet grows
+  - name: gpu-2
+    ip: 10.42.0.3
+    roles:
+      - gpu
+    gpu:
+      vendor: nvidia
+      count: 2
+
+  # General-purpose worker node (optional)
+  - name: worker-1
+    ip: 10.42.0.4
+    roles:
+      - worker                       # Runs non-GPU workloads (n8n, LibreChat, Streamlit)
+
+# ── Layer 1: Inference ─────────────────────────────────────────────────────
+inference:
+  engine: vllm                       # vllm | tgi
+
+  models:                            # Models to serve. Listed in priority order.
+    - name: Qwen/Qwen2.5-7B-Instruct
+      quantization: null             # null = full precision | gptq | awq
+
+    - name: Qwen/Qwen2.5-32B-Instruct
+      quantization: gptq             # Quantized for multi-GPU or lower VRAM
+
+    - name: meta-llama/Llama-3.3-70B-Instruct
+      quantization: awq              # AWQ quantization for large models
+
+# ── Layer 1: API Gateway & Routing ─────────────────────────────────────────
+routing:
+  litellm:
+    rate_limit_tokens_per_min: 10000  # Global rate limit in tokens per minute
+                                      # across all users. Omit for no limit.
+
+# ── Layer 1: Secrets Management ────────────────────────────────────────────
+secrets:
+  provider: openbao                   # openbao: self-hosted Vault-compatible (default)
+                                      # vault: connect to existing HashiCorp Vault
+                                      # external: bring your own secrets management
+
+# ── Layer 2: Storage ────────────────────────────────────────────────────────
+storage:
+  provider: minio                     # minio: S3-compatible object storage
+
+  buckets:
+    - name: documents                 # Document storage for RAG pipelines
+      quota_gb: 100                   # Soft quota in GB (omit for unlimited)
+
+    - name: models-cache              # Shared model weights cache
+                                      # vLLM pods load models from here — no re-download on restart
+
+    - name: n8n-workflows             # n8n workflow and credential backups
+      quota_gb: 10
+
+    - name: app-data                  # General application data
+      quota_gb: 50
+
+# ── Layer 1: Observability ──────────────────────────────────────────────────
+observability:
+  tracing: langfuse                   # langfuse | phoenix
+                                      # LLM tracing backend for debugging prompt chains,
+                                      # token usage, and latency.
+
+  metrics: prometheus                # prometheus (default)
+                                      # Metrics collection for GPU utilization, inference
+                                      # latency, token throughput.
+
+  dashboards: grafana                # grafana (default)
+                                      # Pre-built dashboards for GPU, inference, and
+                                      # cluster health.
+
+# ── Layer 3: Orchestration ──────────────────────────────────────────────────
+orchestration:
+  n8n:
+    enabled: true                     # true (default) | false
+                                      # Self-hosted visual workflow automation.
+                                      # Note: n8n requires ~2 GB RAM minimum.
+    storage_gb: 10                    # Persistent storage for workflows and credentials.
+
+  mcp_servers:                        # Model Context Protocol servers
+                                      # Expose tools and data to LLM agents.
+    - name: filesystem
+      type: stdio                     # stdio | sse | streamable-http
+      mounts:
+        - /data                       # Paths to mount inside the MCP server container
+
+    - name: postgres-tools
+      type: streamable-http           # HTTP-based MCP transport
+
+    - name: web-search
+      type: sse                       # Server-Sent Events transport
+
+# ── Layer 4: Interfaces ─────────────────────────────────────────────────────
+interfaces:
+  librechat:
+    enabled: true                     # Deploy LibreChat as the primary chat interface
+
+  streamlit_apps:                     # Custom Streamlit applications
+    - name: llm-s3-demo
+      repo: ./examples/streamlit/llm-s3-demo  # Local path relative to repo root
+
+    - name: rag-dashboard
+      repo: ./examples/streamlit/rag-dashboard
+
+  bots: []                            # Bot integrations (Telegram, Slack, Discord, Mattermost)
+                                      # TBD — deferred to later phases.

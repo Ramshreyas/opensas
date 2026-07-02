@@ -1,0 +1,202 @@
+---
+# playbooks/headscale.yml — Install and configure Headscale control server
+#
+# Deploys Headscale (open-source Tailscale-compatible control server) on the
+# control-plane node. Uses SQLite backend by default. Generates a pre-auth key
+# that downstream playbooks use for node enrollment.
+#
+# Usage:
+#   ansible-playbook -i inventory/<stack>/hosts.yml playbooks/headscale.yml
+#
+# Decision gate: SQLite is fine for small fleets (<50 nodes).
+#   Switch to Postgres for larger deployments (documented in docs/architecture.md).
+
+- name: Install Headscale control plane
+  hosts: control_plane
+  gather_facts: true
+  vars:
+    headscale_version: 0.23.0
+    headscale_config_dir: /etc/headscale
+    headscale_data_dir: /var/lib/headscale
+    headscale_listen_addr: "0.0.0.0:8080"
+    headscale_metrics_addr: "127.0.0.1:9090"
+    headscale_grpc_listen_addr: "0.0.0.0:50443"
+    headscale_prefixes:
+      v4: 100.64.0.0/10
+      v6: "fd7a:115c:a1e0::/48"
+    opensas_state_dir: /etc/opensas
+    # Configuration overrides from inventory group_vars
+    headscale_domain: "{{ stack_domain }}"
+    headscale_server_url: "http://{{ ansible_host }}:8080"
+
+  tasks:
+    - name: Create OpenSAS state directory
+      ansible.builtin.file:
+        path: "{{ opensas_state_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Check if Headscale is already installed
+      ansible.builtin.stat:
+        path: /usr/bin/headscale
+      register: headscale_binary
+
+    - name: Install Headscale via official package
+      when: not headscale_binary.stat.exists
+      block:
+        - name: Detect OS package manager
+          ansible.builtin.set_fact:
+            _pkg_mgr: >-
+              {{ 'apt' if ansible_facts.os_family == 'Debian'
+                 else 'dnf' if ansible_facts.os_family in ['RedHat', 'Fedora']
+                 else 'unknown' }}
+
+        - name: Fail on unsupported OS
+          ansible.builtin.fail:
+            msg: "Unsupported OS family: {{ ansible_facts.os_family }}. Supported: Debian, RedHat."
+          when: _pkg_mgr == 'unknown'
+
+        - name: Add Headscale APT repository (Debian/Ubuntu)
+          when: _pkg_mgr == 'apt'
+          block:
+            - name: Install prerequisites
+              ansible.builtin.apt:
+                name:
+                  - ca-certificates
+                  - curl
+                  - gnupg
+                state: present
+                update_cache: true
+
+            - name: Add Headscale APT repository (deb822 format)
+              ansible.builtin.deb822_repository:
+                name: headscale
+                types: deb
+                uris: https://pkg.headscale.net/deb/
+                suites: "{{ ansible_facts.distribution_release }}"
+                components: stable
+                architectures: >-
+                  {{ [ansible_facts.architecture] | map('replace', 'x86_64', 'amd64') | map('replace', 'aarch64', 'arm64') | first }}
+                signed_by: https://pkg.headscale.net/deb/headscale.asc
+
+        - name: Add Headscale DNF repository (RHEL/Fedora)
+          when: _pkg_mgr == 'dnf'
+          ansible.builtin.yum_repository:
+            name: headscale
+            description: Headscale stable repository
+            baseurl: >-
+              https://pkg.headscale.net/rpm/$basearch
+            gpgcheck: true
+            gpgkey: https://pkg.headscale.net/rpm/headscale.asc
+            enabled: true
+
+        - name: Install Headscale package
+          ansible.builtin.package:
+            name: headscale
+            state: present
+
+    - name: Ensure Headscale directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0750"
+        owner: headscale
+        group: headscale
+      loop:
+        - "{{ headscale_config_dir }}"
+        - "{{ headscale_data_dir }}"
+
+    - name: Configure Headscale (config.yaml)
+      ansible.builtin.template:
+        src: headscale-config.yaml.j2
+        dest: "{{ headscale_config_dir }}/config.yaml"
+        owner: headscale
+        group: headscale
+        mode: "0640"
+      notify: restart headscale
+
+    - name: Enable and start Headscale service
+      ansible.builtin.systemd:
+        name: headscale
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Wait for Headscale API to be reachable
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:8080/health"
+        status_code: [200]
+      register: _health
+      until: _health.status == 200
+      retries: 15
+      delay: 2
+
+    - name: Create headscale namespace (first-time init)
+      ansible.builtin.command:
+        cmd: headscale namespaces create default
+      register: _ns_create
+      changed_when: "'already exists' not in _ns_create.stderr"
+      failed_when:
+        - _ns_create.rc != 0
+        - "'already exists' not in _ns_create.stderr"
+
+    - name: Check for existing pre-auth key file
+      ansible.builtin.stat:
+        path: "{{ opensas_state_dir }}/headscale-preauth.key"
+      register: _existing_keyfile
+
+    - name: Generate pre-auth key for node enrollment
+      when: not _existing_keyfile.stat.exists
+      block:
+        - name: Create pre-auth key via headscale CLI
+          ansible.builtin.command:
+            cmd: >-
+              headscale preauthkeys create
+              --namespace default
+              --reusable
+              --expiration 24h
+              --output json
+          register: _preauth_output
+          changed_when: true
+
+        - name: Parse pre-auth key from output
+          ansible.builtin.set_fact:
+            _preauth_key: "{{ (_preauth_output.stdout | from_json).key }}"
+
+        - name: Store pre-auth key in OpenSAS state directory
+          ansible.builtin.copy:
+            content: "{{ _preauth_key }}"
+            dest: "{{ opensas_state_dir }}/headscale-preauth.key"
+            mode: "0600"
+            owner: root
+            group: root
+
+    - name: Read existing pre-auth key
+      when: _existing_keyfile.stat.exists
+      ansible.builtin.slurp:
+        src: "{{ opensas_state_dir }}/headscale-preauth.key"
+      register: _existing_key
+
+    - name: Set pre-auth key fact for downstream playbooks
+      ansible.builtin.set_fact:
+        headscale_preauth_key: >-
+          {{ _existing_key.content | b64decode | trim
+             if _existing_keyfile.stat.exists
+             else _preauth_key }}
+      # Cache the fact so tailscale-enroll.yml can read it
+      when: headscale_preauth_key is not defined
+
+  handlers:
+    - name: restart headscale
+      ansible.builtin.systemd:
+        name: headscale
+        state: restarted
+        daemon_reload: true
+
+  post_tasks:
+    - name: Display enrollment instructions
+      ansible.builtin.debug:
+        msg:
+          - "Headscale server is running on {{ ansible_host }}:8080"
+          - "Pre-auth key stored at {{ opensas_state_dir }}/headscale-preauth.key"
+          - Run tailscale-enroll.yml to enroll nodes

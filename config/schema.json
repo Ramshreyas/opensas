@@ -1,0 +1,357 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://opensas.dev/schema/config.json",
+  "title": "OpenSAS Configuration Schema",
+  "description": "Schema for opensas.yaml — the single configuration file that defines the entire Sovereign Automation Stack deployment.",
+  "type": "object",
+  "required": ["stack", "mesh", "nodes", "inference", "secrets", "storage", "observability"],
+  "additionalProperties": false,
+  "properties": {
+    "stack": {
+      "$id": "#/properties/stack",
+      "type": "object",
+      "description": "Top-level stack identification.",
+      "required": ["name", "domain"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Unique name for this stack deployment. Used for resource naming and tagging.",
+          "minLength": 1,
+          "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+        },
+        "domain": {
+          "type": "string",
+          "description": "Base domain for all stack services (e.g., opensas.local). Used for TLS certs and ingress routing.",
+          "minLength": 1
+        }
+      }
+    },
+
+    "mesh": {
+      "$id": "#/properties/mesh",
+      "type": "object",
+      "description": "Layer 0 — Zero-trust mesh networking configuration.",
+      "required": ["provider"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Mesh provider. headscale is the default open-source Tailscale-compatible server. teleport is available as an upgrade path for enterprises needing session recording and RBAC.",
+          "enum": ["headscale", "teleport"],
+          "default": "headscale"
+        }
+      }
+    },
+
+    "nodes": {
+      "$id": "#/properties/nodes",
+      "type": "array",
+      "description": "The VPS fleet. At minimum requires one control-plane node. GPU nodes are optional for inference workloads. No hardware assumptions — user provides their own nodes.",
+      "minItems": 1,
+      "items": {
+        "$id": "#/properties/nodes/items",
+        "type": "object",
+        "required": ["name", "ip", "roles"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Unique hostname for this node.",
+            "minLength": 1,
+            "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+          },
+          "ip": {
+            "type": "string",
+            "description": "IP address of this node (public or private, depending on deployment network).",
+            "format": "ipv4"
+          },
+          "roles": {
+            "type": "array",
+            "description": "Roles assigned to this node. At least one control-plane node is required across the fleet. GPU role requires the gpu field.",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "enum": ["control-plane", "storage", "gpu", "worker"]
+            },
+            "uniqueItems": true
+          },
+          "gpu": {
+            "$id": "#/properties/nodes/items/properties/gpu",
+            "type": "object",
+            "description": "GPU configuration. Required if node has the gpu role. Omit otherwise.",
+            "required": ["vendor", "count"],
+            "additionalProperties": false,
+            "properties": {
+              "vendor": {
+                "type": "string",
+                "description": "GPU vendor. Architecture is vendor-agnostic.",
+                "enum": ["nvidia", "amd", "intel"]
+              },
+              "count": {
+                "type": "integer",
+                "description": "Number of GPUs available on this node.",
+                "minimum": 1
+              }
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "roles": { "contains": { "const": "gpu" } } }
+            },
+            "then": {
+              "required": ["gpu"]
+            }
+          }
+        ]
+      }
+    },
+
+    "inference": {
+      "$id": "#/properties/inference",
+      "type": "object",
+      "description": "Layer 1 — Inference engine and model configuration. Models are user-provided HuggingFace model IDs.",
+      "required": ["engine", "models"],
+      "additionalProperties": false,
+      "properties": {
+        "engine": {
+          "type": "string",
+          "description": "Inference serving engine.",
+          "enum": ["vllm", "tgi"]
+        },
+        "models": {
+          "type": "array",
+          "description": "Models to serve. At least one model is required.",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "HuggingFace model ID (e.g., Qwen/Qwen2.5-7B-Instruct).",
+                "minLength": 1
+              },
+              "quantization": {
+                "type": ["string", "null"],
+                "description": "Quantization method. null = full precision. gptq, awq for quantized inference.",
+                "enum": ["gptq", "awq", null],
+                "default": null
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "routing": {
+      "$id": "#/properties/routing",
+      "type": "object",
+      "description": "Layer 1 — API gateway and routing configuration. LiteLLM proxy handles load balancing, rate limiting, and cost tracking.",
+      "additionalProperties": false,
+      "properties": {
+        "litellm": {
+          "type": "object",
+          "description": "LiteLLM proxy configuration.",
+          "additionalProperties": false,
+          "properties": {
+            "rate_limit_tokens_per_min": {
+              "type": "integer",
+              "description": "Global rate limit in tokens per minute across all users.",
+              "minimum": 1,
+              "default": 10000
+            }
+          }
+        }
+      }
+    },
+
+    "secrets": {
+      "$id": "#/properties/secrets",
+      "type": "object",
+      "description": "Layer 1 — Secrets management backend.",
+      "required": ["provider"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Secrets management provider. openbao is the default self-hosted Vault-compatible option. vault for existing Vault deployments. external for bring-your-own secrets.",
+          "enum": ["openbao", "vault", "external"],
+          "default": "openbao"
+        }
+      }
+    },
+
+    "storage": {
+      "$id": "#/properties/storage",
+      "type": "object",
+      "description": "Layer 2 — S3-compatible object storage for documents, model caches, and application data.",
+      "required": ["provider", "buckets"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Storage provider.",
+          "enum": ["minio"],
+          "default": "minio"
+        },
+        "buckets": {
+          "type": "array",
+          "description": "Buckets to create on the storage provider.",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Bucket name.",
+                "minLength": 1,
+                "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+              },
+              "quota_gb": {
+                "type": "integer",
+                "description": "Soft quota in gigabytes. Omit for no quota.",
+                "minimum": 1
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "observability": {
+      "$id": "#/properties/observability",
+      "type": "object",
+      "description": "Layer 1 — Observability stack: LLM tracing, metrics collection, and dashboards.",
+      "required": ["tracing"],
+      "additionalProperties": false,
+      "properties": {
+        "tracing": {
+          "type": "string",
+          "description": "LLM tracing backend. langfuse is the default. phoenix available as an Arize alternative.",
+          "enum": ["langfuse", "phoenix"]
+        },
+        "metrics": {
+          "type": "string",
+          "description": "Metrics collection system.",
+          "enum": ["prometheus"],
+          "default": "prometheus"
+        },
+        "dashboards": {
+          "type": "string",
+          "description": "Dashboard and visualization platform.",
+          "enum": ["grafana"],
+          "default": "grafana"
+        }
+      }
+    },
+
+    "orchestration": {
+      "$id": "#/properties/orchestration",
+      "type": "object",
+      "description": "Layer 3 — Workflow automation and MCP server configuration.",
+      "additionalProperties": false,
+      "properties": {
+        "n8n": {
+          "type": "object",
+          "description": "n8n workflow automation. Self-hosted visual workflow builder.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Whether to deploy n8n.",
+              "default": true
+            },
+            "storage_gb": {
+              "type": "integer",
+              "description": "Persistent storage size in GB for workflows and credentials.",
+              "minimum": 1,
+              "default": 10
+            }
+          }
+        },
+        "mcp_servers": {
+          "type": "array",
+          "description": "Model Context Protocol servers to deploy. These expose tools and data sources to LLM agents.",
+          "items": {
+            "type": "object",
+            "required": ["name", "type"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Unique name for this MCP server.",
+                "minLength": 1
+              },
+              "type": {
+                "type": "string",
+                "description": "MCP server transport type.",
+                "enum": ["stdio", "sse", "streamable-http"]
+              },
+              "mounts": {
+                "type": "array",
+                "description": "Filesystem paths to mount (for filesystem-type servers).",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "interfaces": {
+      "$id": "#/properties/interfaces",
+      "type": "object",
+      "description": "Layer 4 — User-facing interfaces: chat portals, Streamlit apps, and bot integrations.",
+      "additionalProperties": false,
+      "properties": {
+        "librechat": {
+          "type": "object",
+          "description": "LibreChat — primary multi-model enterprise chat interface.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Whether to deploy LibreChat.",
+              "default": true
+            }
+          }
+        },
+        "streamlit_apps": {
+          "type": "array",
+          "description": "Streamlit apps to deploy alongside the stack.",
+          "items": {
+            "type": "object",
+            "required": ["name", "repo"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Unique name for this Streamlit app.",
+                "minLength": 1
+              },
+              "repo": {
+                "type": "string",
+                "description": "Path or URL to the app repository. Local paths are relative to the opensas repo root.",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "bots": {
+          "type": "array",
+          "description": "Bot integrations (Telegram, Slack, Discord, Mattermost). TBD.",
+          "default": []
+        }
+      }
+    }
+  }
+}

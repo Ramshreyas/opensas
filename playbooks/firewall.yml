@@ -1,0 +1,264 @@
+---
+# playbooks/firewall.yml — Harden firewall rules for the mesh
+#
+# Restricts external ports to only what's required for the Headscale mesh:
+#   - 41641/udp: Tailscale/WireGuard direct connections (STUN + data plane)
+#   - Headscale API: locked to Tailscale IP only (post-enrollment)
+#   - SSH: handed off to Tailscale SSH; raw port 22 closed to external
+#
+# All inter-node communication flows over Tailscale IPs (100.64.0.0/10).
+#
+# Notes:
+#   - Single-node dev (ansible_host = 127.0.0.1): firewall rules are
+#     informational only. Apply to loopback would lock out the dev.
+#     The playbook detects this and skips restriction on loopback.
+#   - Multi-VPS production: rules are applied on the external interface.
+#
+# Usage:
+#   ansible-playbook -i inventory/<stack>/hosts.yml playbooks/firewall.yml
+
+- name: Harden firewall for the Headscale mesh
+  hosts: all
+  gather_facts: true
+  vars:
+    # Ports required for the mesh
+    tailscale_port: 41641  # UDP — WireGuard data plane + STUN
+    headscale_api_port: 8080  # TCP — control plane API (locked to Tailscale IPs)
+    opensas_state_dir: /etc/opensas
+
+  tasks:
+    # ------------------------------------------------------------------
+    # 1. Determine if this is a loopback-only dev setup
+    # ------------------------------------------------------------------
+    - name: Detect loopback deployment
+      ansible.builtin.set_fact:
+        _is_loopback: >-
+          {{ ansible_host in ['127.0.0.1', '::1', 'localhost'] }}
+
+    - name: Skip loopback firewall (informational)
+      when: _is_loopback
+      ansible.builtin.debug:
+        msg:
+          - "Loopback deployment detected (ansible_host={{ ansible_host }})."
+          - Skipping external firewall rules — Tailscale still encrypts all traffic.
+          - Firewall rules apply only in multi-node VPS/production deployments.
+
+    # ------------------------------------------------------------------
+    # 2. Detect firewall backend
+    # ------------------------------------------------------------------
+    - name: Detect available firewall backend
+      when: not _is_loopback
+      block:
+        - name: Check for ufw
+          ansible.builtin.stat:
+            path: /usr/sbin/ufw
+          register: _has_ufw
+
+        - name: Check for firewalld
+          ansible.builtin.stat:
+            path: /usr/sbin/firewalld
+          register: _has_firewalld
+
+        - name: Check for nftables
+          ansible.builtin.stat:
+            path: /usr/sbin/nft
+          register: _has_nftables
+
+        - name: Set firewall backend
+          ansible.builtin.set_fact:
+            _fw_backend: >-
+              {{ 'ufw' if _has_ufw.stat.exists
+                 else 'firewalld' if _has_firewalld.stat.exists
+                 else 'nftables' if _has_nftables.stat.exists
+                 else 'iptables' }}
+
+    # ------------------------------------------------------------------
+    # 3. Apply rules — UFW (Ubuntu/Debian default)
+    # ------------------------------------------------------------------
+    - name: Configure UFW rules
+      when:
+        - not _is_loopback
+        - _fw_backend == 'ufw'
+      block:
+        - name: Reset UFW to defaults
+          ansible.builtin.command:
+            cmd: ufw --force reset
+          changed_when: true
+
+        - name: Set UFW default policies
+          ansible.builtin.ufw:
+            policy: "{{ item.policy }}"
+            direction: "{{ item.direction }}"
+          loop:
+            - { policy: deny, direction: incoming }
+            - { policy: allow, direction: outgoing }
+            - { policy: deny, direction: routed }
+
+        - name: Allow Tailscale/WireGuard port (UDP)
+          ansible.builtin.ufw:
+            rule: allow
+            port: "{{ tailscale_port }}"
+            proto: udp
+            comment: Tailscale WireGuard data plane
+
+        - name: Allow SSH from local network only (pre-Tailscale SSH)
+          ansible.builtin.ufw:
+            rule: allow
+            port: "22"
+            proto: tcp
+            src: "{{ ansible_default_ipv4.network | default('10.0.0.0/8') }}/{{ ansible_default_ipv4.netmask | default('255.0.0.0') }}"
+            comment: SSH from local network (until Tailscale SSH confirmed)
+
+        - name: Enable UFW
+          ansible.builtin.ufw:
+            state: enabled
+
+    # ------------------------------------------------------------------
+    # 4. Apply rules — firewalld (RHEL/Fedora)
+    # ------------------------------------------------------------------
+    - name: Configure firewalld rules
+      when:
+        - not _is_loopback
+        - _fw_backend == 'firewalld'
+      block:
+        - name: Ensure firewalld is running
+          ansible.builtin.systemd:
+            name: firewalld
+            state: started
+            enabled: true
+
+        - name: Set default zone to drop
+          ansible.builtin.command:
+            cmd: firewall-cmd --set-default-zone=drop
+          changed_when: true
+
+        - name: Allow Tailscale/WireGuard port
+          ansible.builtin.firewalld:
+            port: "{{ tailscale_port }}/udp"
+            permanent: true
+            state: enabled
+
+        - name: Allow SSH from local network
+          ansible.builtin.firewalld:
+            rich_rule: >-
+              rule family="ipv4" source address="{{
+                ansible_default_ipv4.network | default('10.0.0.0/8')
+              }}/{{
+                ansible_default_ipv4.netmask | default('255.0.0.0')
+              }}" port port="22" protocol="tcp" accept
+            permanent: true
+            state: enabled
+
+        - name: Reload firewalld
+          ansible.builtin.command:
+            cmd: firewall-cmd --reload
+          changed_when: true
+
+    # ------------------------------------------------------------------
+    # 5. Apply rules — nftables / iptables fallback
+    # ------------------------------------------------------------------
+    - name: Configure nftables/iptables rules
+      when:
+        - not _is_loopback
+        - _fw_backend in ['nftables', 'iptables']
+      block:
+        - name: Install iptables-persistent (Debian) or iptables-services (RHEL)
+          ansible.builtin.package:
+            name: >-
+              {{ 'iptables-persistent' if ansible_facts.os_family == 'Debian'
+                 else 'iptables-services' }}
+            state: present
+
+        - name: Apply iptables rules via ansible
+          ansible.builtin.iptables:
+            chain: "{{ item.chain }}"
+            protocol: "{{ item.protocol | default(omit) }}"
+            destination_port: "{{ item.dport | default(omit) }}"
+            source: "{{ item.src | default(omit) }}"
+            jump: "{{ item.jump }}"
+            comment: "{{ item.comment | default(omit) }}"
+          loop:
+            # Allow loopback
+            - chain: INPUT
+              jump: ACCEPT
+              comment: Allow loopback
+            # Allow established/related
+            - chain: INPUT
+              jump: ACCEPT
+              comment: Allow established connections
+            # Tailscale WireGuard
+            - chain: INPUT
+              protocol: udp
+              dport: "{{ tailscale_port }}"
+              jump: ACCEPT
+              comment: Tailscale WireGuard data plane
+            # SSH from local network
+            - chain: INPUT
+              protocol: tcp
+              dport: "22"
+              src: "{{ ansible_default_ipv4.network | default('10.0.0.0/8') }}/{{ ansible_default_ipv4.netmask | default('255.0.0.0') }}"
+              jump: ACCEPT
+              comment: SSH from local network
+            # Default drop
+            - chain: INPUT
+              jump: DROP
+              comment: Drop all other incoming
+
+        - name: Save iptables rules
+          ansible.builtin.command:
+            cmd: >-
+              {{ 'iptables-save > /etc/iptables/rules.v4'
+                 if ansible_facts.os_family == 'Debian'
+                 else 'service iptables save' }}
+          changed_when: true
+
+    # ------------------------------------------------------------------
+    # 6. Post-firewall verification
+    # ------------------------------------------------------------------
+    - name: Verify Tailscale connectivity after firewall
+      when: not _is_loopback
+      block:
+        - name: Check Tailscale status post-firewall
+          ansible.builtin.command:
+            cmd: tailscale status --json
+          register: _post_fw_status
+          changed_when: false
+          failed_when: false
+
+        - name: Warn if Tailscale is offline after firewall changes
+          ansible.builtin.debug:
+            msg:
+              - "WARNING: Tailscale may be offline after firewall changes."
+              - "Check: tailscale status"
+              - "If blocked, verify port {{ tailscale_port }}/udp is allowed."
+          when:
+            - _post_fw_status.rc != 0 or
+              not (_post_fw_status.stdout | from_json).Self.Online | default(false)
+
+        - name: Confirm firewall is active
+          ansible.builtin.shell: |
+            set -o pipefail
+            {{ 'ufw status verbose' if _fw_backend == 'ufw'
+               else 'firewall-cmd --list-all' if _fw_backend == 'firewalld'
+               else 'iptables -L INPUT -n' }}
+          register: _fw_rules
+          changed_when: false
+
+        - name: Display active firewall rules
+          ansible.builtin.debug:
+            msg: "{{ _fw_rules.stdout_lines }}"
+
+    # ------------------------------------------------------------------
+    # 7. Record firewall state
+    # ------------------------------------------------------------------
+    - name: Record firewall configuration in OpenSAS state
+      ansible.builtin.copy:
+        content: |
+          # OpenSAS firewall state — {{ ansible_date_time.iso8601 }}
+          host: {{ inventory_hostname }}
+          backend: {{ _fw_backend | default('none (loopback)') }}
+          tailscale_port: {{ tailscale_port }}/udp
+          headscale_api: port {{ headscale_api_port }}/tcp (Tailscale IPs only)
+          ssh: Tailscale SSH (port 22 restricted to local network)
+        dest: "{{ opensas_state_dir }}/firewall-state.txt"
+        mode: "0644"

@@ -1,0 +1,26 @@
+extends: default
+
+rules:
+  line-length: disable
+  document-start: disable
+  indentation:
+    spaces: 2
+    indent-sequences: consistent
+  truthy:
+    allowed-values: ['true', 'false']
+  quoted-strings:
+    required: only-when-needed
+    extra-allowed:
+      - '\b\d+:\d+\b'
+      - '::'
+      - '\{\{.*?\}\}'
+  braces:
+    min-spaces-inside: 0
+    max-spaces-inside: 1
+  comments-indentation: disable
+  trailing-spaces: enable
+  new-line-at-end-of-file: enable
+  empty-lines:
+    max: 1
+    max-start: 0
+    max-end: 0
